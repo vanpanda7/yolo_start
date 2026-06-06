@@ -3,103 +3,77 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>视频管理 - 数据集浏览器</title>
+<title>视频抽帧</title>
 <link rel="stylesheet" href="/static/style.css">
-<style>
-.upload-zone {
-    border: 2px dashed #30363d; border-radius: 8px; padding: 40px;
-    text-align: center; cursor: pointer; transition: all 0.2s;
-    margin-bottom: 24px;
-}
-.upload-zone:hover, .upload-zone.drag { border-color: #58a6ff; background: #1c2333; }
-.upload-zone input { display: none; }
-.upload-icon { font-size: 2.5rem; display: block; margin-bottom: 10px; }
-.video-list { display: flex; flex-direction: column; gap: 8px; }
-.video-row {
-    display: flex; align-items: center; gap: 16px;
-    background: #161b22; border: 1px solid #21262d; border-radius: 8px;
-    padding: 14px 18px;
-}
-.video-name { flex: 1; font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.video-size { color: #8b949e; font-size: 0.85rem; min-width: 60px; }
-.video-status { font-size: 0.8rem; padding: 3px 10px; border-radius: 12px; font-weight: 500; }
-.video-status.idle { background: #21262d; color: #8b949e; }
-.video-status.running { background: #1f6feb22; color: #58a6ff; }
-.video-status.done { background: #3fb95022; color: #3fb950; }
-.video-status.error { background: #f8514922; color: #f85149; }
-.progress-bar { width: 120px; height: 6px; background: #21262d; border-radius: 3px; overflow: hidden; }
-.progress-fill { height: 100%; background: #58a6ff; border-radius: 3px; transition: width 0.3s; }
-.progress-fill.done { background: #3fb950; }
-.progress-fill.error { background: #f85149; }
-.btn-sm {
-    padding: 5px 12px; border-radius: 5px; font-size: 0.8rem; cursor: pointer;
-    border: 1px solid #30363d; background: #21262d; color: #c9d1d9; transition: all 0.2s;
-}
-.btn-sm:hover { background: #30363d; }
-.btn-sm.primary { background: #238636; border-color: #238636; color: #fff; }
-.btn-sm.primary:hover { background: #2ea043; }
-.btn-sm.danger { color: #f85149; }
-.btn-sm.danger:hover { background: #f8514922; }
-.btn-sm:disabled { opacity: 0.4; cursor: not-allowed; }
-.toast {
-    position: fixed; top: 20px; right: 20px; z-index: 999;
-    padding: 12px 20px; border-radius: 8px; font-size: 0.9rem;
-    background: #238636; color: #fff; opacity: 0; transform: translateY(-10px);
-    transition: all 0.3s;
-}
-.toast.show { opacity: 1; transform: translateY(0); }
-.toast.error { background: #da3633; }
-.empty-videos { text-align: center; padding: 50px; color: #8b949e; }
-</style>
 </head>
 <body>
 <div class="container">
-    <nav>
-        <h1>📹 视频管理</h1>
-<div class="nav-links">
-<a href="/">仪表盘</a>
-<a href="/gallery">图片画廊</a>
-<a href="/label">标注工作台</a>
-<a href="/videos" class="active">视频管理</a>
-<span style="color:#8b949e;font-size:.68rem;margin:0 4px">|</span>
-<select id="modelSel" style="background:#161b22;border:1px solid #30363d;color:#58a6ff;border-radius:4px;padding:2px 6px;font-size:.7rem;cursor:pointer;max-width:140px" onchange="switchModel(this.value)"></select>
-</div>
-<script>
-(async function(){const s=document.getElementById('modelSel');const r=await fetch('/api/models'),d=await r.json();s.innerHTML=d.available.map(m=>'<option value="'+m+'"'+(m===d.active?' selected':'')+'>'+m.replace('.pt','')+'</option>').join('')})();
-function switchModel(v){fetch('/api/models/active',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({model:v})});location.reload()}
-</script>
-    </nav>
+    {% include "_nav.html" %}
 
-    <!-- 上传区 -->
-    <div class="upload-zone" id="uploadZone">
-        <span class="upload-icon">⬆️</span>
-        <p>点击或拖拽视频文件到此处上传</p>
-        <p style="color:#8b949e;font-size:0.8rem">支持 .mp4 .avi .mkv .mov .webm .flv</p>
-        <input type="file" id="fileInput" accept="video/*" multiple>
-    </div>
-
-    <div id="toast" class="toast"></div>
-
-    <!-- 视频列表 -->
-    <h2 style="margin-bottom:12px">视频列表</h2>
-    <div class="video-list" id="videoList">
-        {% if videos %}
-            {% for v in videos %}
-            <div class="video-row" id="row-{{ v.name }}">
-                <span class="video-name" title="{{ v.name }}">{{ v.name }}</span>
-                <span class="video-size">{{ v.size_mb }} MB</span>
-                <span class="video-status {{ v.status }}">{{ {'idle':'待处理','running':'抽帧中...','done':'已完成','error':'失败'}.get(v.status, v.status) }}</span>
-                {% if v.status == 'running' %}
-                <div class="progress-bar"><div class="progress-fill" style="width:{{ (v.saved / max(v.total, 1) * 100) if v.total else 50 }}%"></div></div>
-                {% endif %}
-                <button class="btn-sm primary" onclick="processVideo('{{ v.name }}')" {{ 'disabled' if v.status == 'running' else '' }}>抽帧</button>
-                <button class="btn-sm danger" onclick="deleteVideo('{{ v.name }}')">删除</button>
+    <section class="two-column">
+        <div class="panel">
+            <div class="panel-header">
+                <div>
+                    <p class="eyebrow">Step 1</p>
+                    <h2>上传视频并抽帧</h2>
+                </div>
+                <select id="modelSel" class="select-control" title="预标注模型"></select>
             </div>
-            {% endfor %}
-        {% else %}
-            <div class="empty-videos"><p>还没有视频，上传一个开始吧</p></div>
-        {% endif %}
-    </div>
+
+            <div class="upload-zone" id="uploadZone">
+                <strong>点击或拖拽视频到这里</strong>
+                <span>支持 mp4、avi、mkv、mov、webm、flv。抽帧结果会进入 dataset/images 和 dataset/labels。</span>
+                <input type="file" id="fileInput" accept="video/*" multiple>
+            </div>
+
+            <div id="toast" class="toast"></div>
+
+            <div class="video-list" id="videoList">
+                {% if videos %}
+                    {% for v in videos %}
+                    <div class="video-row" id="row-{{ v.name }}">
+                        <div class="video-name" title="{{ v.name }}">
+                            <strong>{{ v.name }}</strong>
+                            <span>{{ v.size_mb }} MB</span>
+                        </div>
+                        <span class="video-status {{ v.status }}">{{ {'idle':'待处理','running':'抽帧中','done':'已完成','error':'失败'}.get(v.status, v.status) }}</span>
+                        {% if v.status == 'running' %}
+                        {% set denom = v.total if v.total else 1 %}
+                        <div class="progress-bar"><div class="progress-fill" style="width:{{ (v.saved / denom * 100) if v.total else 50 }}%"></div></div>
+                        {% endif %}
+                        <button class="btn-sm primary" onclick="processVideo({{ v.name|tojson }})" {{ 'disabled' if v.status == 'running' else '' }}>抽帧</button>
+                        <button class="btn-sm danger" onclick="deleteVideo({{ v.name|tojson }})">删除</button>
+                    </div>
+                    {% endfor %}
+                {% else %}
+                    <div class="empty-state">还没有视频。上传后可以在这里启动抽帧。</div>
+                {% endif %}
+            </div>
+        </div>
+
+        <aside class="panel">
+            <div class="panel-header">
+                <div>
+                    <p class="eyebrow">Behavior</p>
+                    <h2>这一步会做什么</h2>
+                </div>
+            </div>
+            <div class="info-list">
+                <div><span>Video path</span><code>{{ context.paths.videos }}</code></div>
+                <div><span>Output images</span><code>{{ context.paths.images }}</code></div>
+                <div><span>Output labels</span><code>{{ context.paths.labels }}</code></div>
+                <div><span>Source map</span><code>{{ context.paths.sources }}</code></div>
+            </div>
+            <div class="callout">
+                <strong>关键信息</strong>
+                <p>预标注只是启动数据集的辅助。训练前仍然需要进入标注工作台复核误检、漏检和空样本。</p>
+            </div>
+            <div class="command-card">
+                <span>CLI alternative</span>
+                <code>{{ context.commands.extract }}</code>
+            </div>
+        </aside>
+    </section>
 </div>
 
 <script>
@@ -127,13 +101,13 @@ async function handleFiles(files) {
     for (const f of files) {
         const form = new FormData();
         form.append('file', f);
-        showToast('正在上传 ' + f.name + '...');
+        showToast('正在上传 ' + f.name);
         try {
             const r = await fetch('/api/videos/upload', { method: 'POST', body: form });
             const j = await r.json();
             if (j.ok) {
-                showToast('上传成功: ' + j.name + ' (' + j.size_mb + ' MB)');
-                setTimeout(() => location.reload(), 800);
+                showToast('上传成功: ' + j.name);
+                setTimeout(() => location.reload(), 700);
             } else {
                 showToast('上传失败: ' + j.error, true);
             }
@@ -149,7 +123,7 @@ async function processVideo(name) {
         const r = await fetch('/api/videos/process/' + encodeURIComponent(name), { method: 'POST' });
         const j = await r.json();
         if (j.ok) {
-            showToast('抽帧已启动，请等待...');
+            showToast('抽帧已启动');
             pollStatus(name);
         } else {
             showToast(j.error, true);
@@ -165,29 +139,36 @@ function pollStatus(name) {
         const jobs = await r.json();
         const job = jobs[name];
         if (!job) { clearInterval(interval); return; }
-
-        // 更新行
-        const row = document.getElementById('row-' + name);
-        if (row) {
-            if (job.status === 'done') {
-                clearInterval(interval);
-                showToast(name + ' 抽帧完成！保存 ' + job.saved + ' 帧');
-                location.reload();
-            } else if (job.status === 'error') {
-                clearInterval(interval);
-                showToast('抽帧失败: ' + job.error, true);
-                location.reload();
-            }
+        if (job.status === 'done') {
+            clearInterval(interval);
+            showToast(name + ' 抽帧完成，保存 ' + job.saved + ' 帧');
+            location.reload();
+        } else if (job.status === 'error') {
+            clearInterval(interval);
+            showToast('抽帧失败: ' + job.error, true);
+            location.reload();
         }
     }, 2000);
 }
 
 async function deleteVideo(name) {
-    if (!confirm('确认删除 ' + name + ' ？')) return;
+    if (!confirm('确认删除 ' + name + '？')) return;
     const r = await fetch('/api/videos/delete/' + encodeURIComponent(name), { method: 'POST' });
     const j = await r.json();
     if (j.ok) location.reload();
 }
+
+(async function initModelSel(){
+    const sel=document.getElementById('modelSel');
+    try{
+        const r=await fetch('/api/models'),d=await r.json();
+        sel.innerHTML=d.available.map(m=>'<option value="'+m+'"'+(m===d.active?' selected':'')+'>'+m+'</option>').join('');
+        sel.onchange=async()=>{
+            await fetch('/api/models/active',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({model:sel.value})});
+            showToast('预标注模型已切换: '+sel.value);
+        }
+    }catch(e){sel.innerHTML='<option>yolov8n.pt</option>'}
+})();
 </script>
 </body>
 </html>

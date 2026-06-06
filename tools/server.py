@@ -9,7 +9,6 @@ Usage:
 """
 
 import argparse
-import os
 import sys
 import threading
 import time
@@ -18,11 +17,21 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-import yaml
-from flask import Flask, jsonify, redirect, render_template, request, send_file, url_for
+from flask import Flask, jsonify, render_template, request, send_file
 from werkzeug.utils import secure_filename
 
 sys.path.insert(0, str(Path(__file__).parent))
+from common import (
+    configured_path,
+    dataset_dirs,
+    ensure_dataset_dirs,
+    get_class_colors,
+    get_classes,
+    iter_images,
+    load_config,
+    read_yolo_label,
+    write_yolo_label,
+)
 
 app = Flask(__name__)
 
@@ -30,29 +39,20 @@ app = Flask(__name__)
 # 配置
 # ============================================================
 
-def load_config(path: str = "config.yaml") -> dict:
-    p = Path(path)
-    if not p.exists():
-        p = Path(__file__).parent / path
-    with open(p, "r", encoding="utf-8") as f:
-        return yaml.safe_load(f)
-
 config = load_config()
-classes = config.get("classes", {0: "enemy_body", 1: "enemy_head"})
+classes = get_classes(config)
 class_names = [classes[k] for k in sorted(classes.keys())]
-class_colors = config.get("class_colors", {0: [255, 0, 0], 1: [0, 0, 255]})
+class_colors = get_class_colors(config) or {0: [0, 180, 255]}
 
-dscfg = config.get("dataset", {})
-dspath = Path(dscfg.get("path", "./dataset"))
-if not dspath.is_absolute():
-    dspath = Path(__file__).parent / dspath
-IMG_DIR = dspath / "images"
-LBL_DIR = dspath / "labels"
+dpaths = ensure_dataset_dirs(config)
+dspath = dpaths["root"]
+IMG_DIR = dpaths["images"]
+LBL_DIR = dpaths["labels"]
 
 # 来源元数据
 import json as _json
-SOURCES_PATH = dspath / "sources.json"
-MODEL_STATE_PATH = Path(__file__).parent / "model_state.json"
+SOURCES_PATH = dpaths["sources"]
+MODEL_STATE_PATH = configured_path(config, "weights", "weights") / "model_state.json"
 def _load_sources() -> dict:
     if SOURCES_PATH.exists():
         with open(SOURCES_PATH, "r", encoding="utf-8") as f:
@@ -63,8 +63,8 @@ def _save_sources(data: dict):
         _json.dump(data, f, indent=2, ensure_ascii=False)
 
 # 视频目录
-VIDEO_DIR = Path(__file__).parent / "videos"
-VIDEO_DIR.mkdir(exist_ok=True)
+VIDEO_DIR = configured_path(config, "videos", "data/videos")
+VIDEO_DIR.mkdir(parents=True, exist_ok=True)
 ALLOWED_EXTENSIONS = {"mp4", "avi", "mkv", "mov", "webm", "flv"}
 
 # 简单 TTL 缓存
@@ -78,9 +78,147 @@ def _cached(key: str, ttl: float = 2.0):
 def _cache_set(key: str, val):
     _cache[key] = {"val": val, "ts": time.time()}
 
+
+def _invalidate_dataset_cache() -> None:
+    for key in list(_cache):
+        if key == "labeled_images" or key.startswith(("img_b64_", "img_size_")):
+            _cache.pop(key, None)
+
 # 后台抽帧任务状态
 _jobs: dict = {}       # {video_name: {status, progress, total, saved, error}}
 _jobs_lock = threading.Lock()
+
+
+def _project_context(stats: dict | None = None) -> dict:
+    """Build the teaching/status context shown in the Flask console.
+
+    The UI is intentionally explicit about paths and commands because a new
+    YOLO user needs to connect each screen action with the files that training
+    scripts consume later.
+    """
+    stats = stats or get_stats()
+    dirs = dataset_dirs(config)
+    weights_dir = configured_path(config, "weights", "weights")
+    reports_dir = configured_path(config, "reports", "reports")
+    exports_dir = configured_path(config, "exports", "exports")
+    prepared_yaml = dirs["prepared"] / "dataset.yaml"
+    best_weights = weights_dir / "best.pt"
+    evaluation_report = reports_dir / "evaluation.json"
+
+    return {
+        "paths": {
+            "dataset": str(dirs["root"]),
+            "images": str(dirs["images"]),
+            "labels": str(dirs["labels"]),
+            "sources": str(dirs["sources"]),
+            "prepared": str(dirs["prepared"]),
+            "videos": str(VIDEO_DIR),
+            "weights": str(weights_dir),
+            "reports": str(reports_dir),
+            "exports": str(exports_dir),
+        },
+        "commands": {
+            "install": "pip install -r requirements.txt",
+            "import_images": "python tools/import_images.py --source data/imports --source-name screenshots",
+            "extract": "python tools/video_extractor.py --input data/videos --interval 2.0",
+            "label": "python tools/server.py",
+            "prepare": "python tools/train.py --prepare-only",
+            "train": "python tools/train.py --epochs 100 --device cpu",
+            "evaluate": "python tools/evaluate.py --weights weights/best.pt",
+            "infer": "python tools/infer.py --weights weights/best.pt --source path/to/image_or_video",
+        },
+        "artifacts": {
+            "prepared_yaml": prepared_yaml.exists(),
+            "best_weights": best_weights.exists(),
+            "evaluation_report": evaluation_report.exists(),
+        },
+        "active_model": get_active_model(),
+        "classes": classes,
+        "stats": stats,
+    }
+
+
+def _workflow_steps(stats: dict) -> list[dict]:
+    """Return status for the step-by-step learning flow.
+
+    These statuses are deliberately derived from files, not from session state:
+    restarting Flask should show the same truth as the filesystem.
+    """
+    context = _project_context(stats)
+    artifacts = context["artifacts"]
+    total = stats["total_images"]
+    labeled = stats["labeled_images"]
+    boxes = stats["total_boxes"]
+    has_video = bool(list_videos())
+
+    def status(done: bool, ready: bool = False) -> str:
+        if done:
+            return "done"
+        if ready:
+            return "ready"
+        return "blocked"
+
+    return [
+        {
+            "number": 1,
+            "title": "收集样本",
+            "status": status(total > 0, has_video),
+            "summary": f"{total} images in dataset, {len(list_videos())} videos staged.",
+            "action": "上传视频或导入截图",
+            "href": "/videos",
+            "command": context["commands"]["extract"],
+            "note": "抽帧会写入 images、labels 和 sources.json；sources.json 后续用于按视频来源切分 train/val。",
+        },
+        {
+            "number": 2,
+            "title": "复核标注",
+            "status": status(labeled > 0 and boxes > 0, total > 0),
+            "summary": f"{labeled}/{total} images have label files, {boxes} boxes total.",
+            "action": "打开标注工作台",
+            "href": "/label",
+            "command": context["commands"]["label"],
+            "note": "YOLO 标签是 class_id + 归一化中心点和宽高；空 txt 文件表示负样本。",
+        },
+        {
+            "number": 3,
+            "title": "准备并训练",
+            "status": status(artifacts["best_weights"], boxes > 0),
+            "summary": "best.pt exists." if artifacts["best_weights"] else "No trained weights yet.",
+            "action": "查看训练命令",
+            "href": "/",
+            "command": context["commands"]["train"],
+            "note": "训练前会重建 prepared/，优先按 sources.json 分组，避免同一视频连续帧同时进入训练和验证。",
+        },
+        {
+            "number": 4,
+            "title": "评估模型",
+            "status": status(artifacts["evaluation_report"], artifacts["best_weights"]),
+            "summary": "evaluation.json exists." if artifacts["evaluation_report"] else "No evaluation report yet.",
+            "action": "运行评估命令",
+            "href": "/",
+            "command": context["commands"]["evaluate"],
+            "note": "评估会在验证集上计算 mAP，并把指标写入 reports/evaluation.json。",
+        },
+        {
+            "number": 5,
+            "title": "离线推理",
+            "status": status(False, artifacts["best_weights"]),
+            "summary": "Use images, folders, or videos as source files.",
+            "action": "运行推理命令",
+            "href": "/gallery",
+            "command": context["commands"]["infer"],
+            "note": "推理结果默认保存到 exports/，不会接管屏幕或做实时叠加。",
+        },
+    ]
+
+
+def _active_model_path() -> str:
+    """Resolve the selected prelabel model for background extraction."""
+    active = get_active_model()
+    if active == "yolov8n.pt":
+        return active
+    candidate = configured_path(config, "weights", "weights") / active
+    return str(candidate) if candidate.exists() else active
 
 
 # ============================================================
@@ -92,7 +230,7 @@ def list_labeled_images():
     cached = _cached("labeled_images")
     if cached is not None:
         return cached
-    imgs = sorted(IMG_DIR.glob("*.jpg")) + sorted(IMG_DIR.glob("*.png"))
+    imgs = iter_images(IMG_DIR, config)
     sources = _load_sources()
     result = []
     for img in imgs:
@@ -111,21 +249,7 @@ def list_labeled_images():
 def read_labels(name: str) -> list:
     """读取 YOLO 标签，返回 [{class_id, xc, yc, w, h}]。"""
     lbl_path = LBL_DIR / f"{Path(name).stem}.txt"
-    if not lbl_path.exists():
-        return []
-    boxes = []
-    with open(lbl_path) as f:
-        for line in f:
-            parts = line.strip().split()
-            if len(parts) >= 5:
-                boxes.append({
-                    "class_id": int(parts[0]),
-                    "xc": float(parts[1]),
-                    "yc": float(parts[2]),
-                    "w": float(parts[3]),
-                    "h": float(parts[4]),
-                })
-    return boxes
+    return read_yolo_label(lbl_path)
 
 
 def get_stats():
@@ -176,7 +300,7 @@ def draw_boxes_on_image(img_path: str, boxes: list, max_size: int = None) -> np.
 
 
 def img_to_png_bytes(img: np.ndarray) -> bytes:
-    """numpy BGR 数组 → PNG 字节流。"""
+    """Convert a numpy BGR image array to PNG bytes."""
     _, buf = cv2.imencode(".png", img)
     return buf.tobytes()
 
@@ -188,7 +312,15 @@ def img_to_png_bytes(img: np.ndarray) -> bytes:
 @app.route("/")
 def index():
     stats = get_stats()
-    return render_template("index.html", stats=stats, classes=classes)
+    return render_template(
+        "index.html",
+        stats=stats,
+        classes=classes,
+        class_colors=class_colors,
+        context=_project_context(stats),
+        workflow=_workflow_steps(stats),
+        videos=list_videos(),
+    )
 
 
 @app.route("/gallery")
@@ -215,6 +347,7 @@ def gallery():
         total=total,
         classes=classes,
         class_colors=class_colors,
+        context=_project_context(),
     )
 
 
@@ -238,6 +371,7 @@ def image_detail(name):
         boxes=boxes,
         classes=classes,
         class_colors=class_colors,
+        context=_project_context(),
         png_b64=png_b64,
     )
 
@@ -334,7 +468,14 @@ def list_videos():
     return result
 
 def _run_extraction(video_name: str):
-    """后台线程：执行视频抽帧。"""
+    """Background extraction entrypoint.
+
+    Behavior:
+    - Reads one local video from data/videos.
+    - Writes sampled frames to dataset/images.
+    - Writes YOLO txt labels to dataset/labels.
+    - Updates sources.json so train.py can split by source video later.
+    """
     from video_extractor import VideoExtractor
     try:
         with _jobs_lock:
@@ -345,8 +486,13 @@ def _run_extraction(video_name: str):
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         cap.release()
 
-        extractor = VideoExtractor(config)
-        saved = extractor.process_video(video_path)
+        extraction_config = dict(config)
+        extraction_config["prelabel"] = dict(config.get("prelabel", {}))
+        extraction_config["prelabel"]["model"] = _active_model_path()
+        extractor = VideoExtractor(extraction_config)
+        result = extractor.process_video(video_path)
+        saved = int(result.get("saved", 0))
+        _invalidate_dataset_cache()
 
         with _jobs_lock:
             _jobs[video_name] = {"status": "done", "progress": 100, "total": total_frames,
@@ -363,7 +509,13 @@ def _run_extraction(video_name: str):
 
 @app.route("/videos")
 def videos_page():
-    return render_template("videos.html", videos=list_videos())
+    stats = get_stats()
+    return render_template(
+        "videos.html",
+        videos=list_videos(),
+        context=_project_context(stats),
+        workflow=_workflow_steps(stats),
+    )
 
 
 @app.route("/api/videos/list")
@@ -373,6 +525,11 @@ def api_videos_list():
 
 @app.route("/api/videos/upload", methods=["POST"])
 def api_videos_upload():
+    """Upload a local video into the staging folder.
+
+    This endpoint does not change the YOLO dataset yet. It only stages the raw
+    video; extraction happens when /api/videos/process/<name> is called.
+    """
     if "file" not in request.files:
         return jsonify({"error": "no file"}), 400
     file = request.files["file"]
@@ -388,6 +545,7 @@ def api_videos_upload():
 
 @app.route("/api/videos/process/<name>", methods=["POST"])
 def api_videos_process(name):
+    """Start asynchronous frame extraction for one uploaded video."""
     video_path = VIDEO_DIR / name
     if not video_path.exists():
         return jsonify({"error": "video not found"}), 404
@@ -430,7 +588,13 @@ def _label_stats():
 @app.route("/label")
 def label_page():
     stats = _label_stats()
-    return render_template("label.html", classes=classes, stats=stats)
+    return render_template(
+        "label.html",
+        classes=classes,
+        class_colors=class_colors,
+        stats=stats,
+        context=_project_context(),
+    )
 
 @app.route("/api/label/list")
 def api_label_list():
@@ -479,28 +643,28 @@ def api_label_get(name):
 
 @app.route("/api/label/<name>", methods=["POST"])
 def api_label_save(name):
-    """保存标注框（覆盖写入 YOLO 格式标签文件）。"""
+    """Persist boxes for one image as a YOLO label file.
+
+    The frontend can keep temporary ignore boxes with class_id < 0. Those are
+    intentionally filtered out by write_yolo_label(), because Ultralytics
+    expects every saved row to contain a real class id.
+    """
     data = request.get_json(force=True)
     boxes = data.get("boxes", [])
     lbl_path = LBL_DIR / f"{Path(name).stem}.txt"
-    lines = []
-    for b in boxes:
-        cid = int(b["class_id"])
-        xc = float(b["xc"])
-        yc = float(b["yc"])
-        w = float(b["w"])
-        h = float(b["h"])
-        if w <= 0 or h <= 0:
-            continue
-        lines.append(f"{cid} {xc:.6f} {yc:.6f} {w:.6f} {h:.6f}")
-    with open(lbl_path, "w") as f:
-        f.write("\n".join(lines))
-    return jsonify({"ok": True, "saved": len(lines)})
+    saved = write_yolo_label(lbl_path, boxes)
+    _invalidate_dataset_cache()
+    return jsonify({"ok": True, "saved": saved})
 
 
 @app.route("/api/label/batch-ignore", methods=["POST"])
 def api_label_batch_ignore():
-    """批量标记：对同视频来源的所有帧，删除与指定区域重叠的框。"""
+    """Remove boxes from all images with the same source.
+
+    This is a review helper for video-derived datasets. If a HUD/watermark or
+    static false positive appears in the same location across a source video,
+    selecting that region once can remove matching boxes from that source only.
+    """
     data = request.get_json(force=True)
     source = data.get("source", "")
     zone = data.get("zone", {})  # {x1, y1, x2, y2} 归一化坐标或像素
@@ -555,15 +719,11 @@ def api_label_batch_ignore():
             kept.append(b)
 
         if len(kept) != len(boxes):
-            # 重写标签文件
             lbl_path = LBL_DIR / f"{Path(name).stem}.txt"
-            lines = []
-            for b in kept:
-                lines.append(f"{b['class_id']} {b['xc']:.6f} {b['yc']:.6f} {b['w']:.6f} {b['h']:.6f}")
-            with open(lbl_path, "w") as f:
-                f.write("\n".join(lines))
+            write_yolo_label(lbl_path, kept)
             affected += 1
 
+    _invalidate_dataset_cache()
     return jsonify({
         "ok": True,
         "source": source,
@@ -596,6 +756,7 @@ def api_label_reset(name):
     lbl_path = LBL_DIR / f"{Path(name).stem}.txt"
     if lbl_path.exists():
         lbl_path.unlink()
+    _invalidate_dataset_cache()
     return jsonify({"ok": True})
 
 
@@ -610,13 +771,14 @@ def _load_model_state() -> dict:
     return {"active": "yolov8n.pt", "available": ["yolov8n.pt"]}
 
 def _save_model_state(state: dict):
+    MODEL_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
     with open(MODEL_STATE_PATH, "w") as f:
         _json.dump(state, f, indent=2)
 
 @app.route("/api/models")
 def api_models():
     """列出可用模型 + 当前激活的模型。"""
-    wdir = Path(__file__).parent / "weights"
+    wdir = configured_path(config, "weights", "weights")
     available = ["yolov8n.pt"]  # COCO 预训练始终可用
     for p in sorted(wdir.glob("*.pt")):
         available.append(p.name)
@@ -627,7 +789,7 @@ def api_models():
 
 @app.route("/api/models/active", methods=["POST"])
 def api_models_set_active():
-    """设置当前使用的模型。"""
+    """Set the model used by Web-triggered prelabel/extraction jobs."""
     data = request.get_json(force=True)
     model = data.get("model", "yolov8n.pt")
     state = _load_model_state()
@@ -652,7 +814,7 @@ def api_dedup():
     threshold = data.get("threshold", 8)
     dry_run = data.get("dry_run", True)
 
-    imgs = sorted(IMG_DIR.glob("frame_*.jpg"))
+    imgs = iter_images(IMG_DIR, config)
     if len(imgs) < 2:
         return jsonify({"ok": True, "removed": 0, "message": "图片不足2张"})
 
@@ -720,13 +882,19 @@ def main():
     args = parser.parse_args()
 
     # 重新加载配置以适配命令行参数
-    global config, IMG_DIR, LBL_DIR, dspath
+    global config, classes, class_names, class_colors, IMG_DIR, LBL_DIR, dspath, SOURCES_PATH, MODEL_STATE_PATH, VIDEO_DIR
     config = load_config(args.config)
-    dspath = Path(config.get("dataset", {}).get("path", "./dataset"))
-    if not dspath.is_absolute():
-        dspath = Path(__file__).parent / dspath
-    IMG_DIR = dspath / "images"
-    LBL_DIR = dspath / "labels"
+    classes = get_classes(config)
+    class_names = [classes[k] for k in sorted(classes.keys())]
+    class_colors = get_class_colors(config) or {0: [0, 180, 255]}
+    dpaths = ensure_dataset_dirs(config)
+    dspath = dpaths["root"]
+    IMG_DIR = dpaths["images"]
+    LBL_DIR = dpaths["labels"]
+    SOURCES_PATH = dpaths["sources"]
+    MODEL_STATE_PATH = configured_path(config, "weights", "weights") / "model_state.json"
+    VIDEO_DIR = configured_path(config, "videos", "data/videos")
+    VIDEO_DIR.mkdir(parents=True, exist_ok=True)
 
     host = args.host or config.get("server", {}).get("host", "0.0.0.0")
     port = args.port or config.get("server", {}).get("port", 5000)

@@ -8,15 +8,7 @@
 </head>
 <body>
 <div class="container">
-    <nav>
-        <h1>📷 {{ name }}</h1>
-        <div class="nav-links">
-            <a href="/">仪表盘</a>
-            <a href="/gallery">图片画廊</a>
-            <a href="/label">标注工作台</a>
-            <a href="/videos">视频管理</a>
-        </div>
-    </nav>
+    {% include "_nav.html" %}
 
     <div class="image-detail">
         <div class="image-container">
@@ -42,7 +34,7 @@
                 {% for b in boxes %}
                     <tr>
                         <td>
-                            <span class="mini-tag" style="background:rgb({{ [255,0,0] if b.class_id == 0 else [0,0,255] }})">
+                            <span class="mini-tag" style="background:rgb({{ class_colors.get(b.class_id, [0,180,255]) | join(',') }})">
                                 {{ classes.get(b.class_id, '?') }}
                             </span>
                         </td>
@@ -59,8 +51,8 @@
             {% endif %}
 
             <div class="image-actions">
-                <a href="/image/{{ name }}/full" class="btn" download>📥 下载原图</a>
-                <a href="/gallery" class="btn btn-outline">← 返回画廊</a>
+                <a href="{{ url_for('image_full', name=name) }}" class="btn primary" download>下载原图</a>
+                <a href="/gallery" class="btn">返回画廊</a>
             </div>
         </div>
     </div>

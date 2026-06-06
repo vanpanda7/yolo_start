@@ -1,0 +1,12 @@
+<nav class="app-nav">
+    <div>
+        <a class="brand" href="/">YOLO Game Detector</a>
+        <div class="brand-subtitle">Offline dataset, annotation, training, evaluation, inference</div>
+    </div>
+    <div class="nav-links">
+        <a href="/" class="{{ 'active' if request.path == '/' else '' }}">Dashboard</a>
+        <a href="/videos" class="{{ 'active' if request.path.startswith('/videos') else '' }}">Videos</a>
+        <a href="/label" class="{{ 'active' if request.path.startswith('/label') else '' }}">Label</a>
+        <a href="/gallery" class="{{ 'active' if request.path.startswith('/gallery') or request.path.startswith('/image') else '' }}">Gallery</a>
+    </div>
+</nav>

@@ -1,11 +1,88 @@
-# Plugin disguise configuration
-plugin_name: "DeltaForce OBS Lockhead Assistant"
-version: "2.6.0"
+# YOLO game-target detector configuration.
+#
+# This project is scoped to offline video/image dataset creation, annotation,
+# training, evaluation, and file-based inference. It intentionally does not
+# include installer, plugin, injection, or live overlay behavior.
 
-# Warning popup content (modified as requested)
-warning_message:
-  title: "DeltaForce-OBS-Locker 安装确认"
-  text: "是否安装DeltaForce-OBS-Locker三角洲吸附插件？"
+project:
+  name: "yolo_game_detector"
+  seed: 42
 
-# Download directory (optional)
-download_dir: "./downloads"
+# Start with one class. Add more only after the single-class detector is stable.
+classes:
+  0: "player"
+
+class_colors:
+  0: [0, 180, 255]
+
+paths:
+  dataset: "datasets/game_targets"
+  videos: "data/videos"
+  imports: "data/imports"
+  weights: "weights"
+  runs: "runs"
+  reports: "reports"
+  exports: "exports"
+
+dataset:
+  image_extensions: [".jpg", ".jpeg", ".png", ".bmp", ".webp"]
+  train_split: 0.85
+  split_strategy: "source"
+  prepared_subdir: "prepared"
+  sources_file: "sources.json"
+  include_negative: true
+
+prelabel:
+  enabled: true
+  model: "yolov8n.pt"
+  conf_threshold: 0.25
+  # COCO class id 0 = person. Used only when prelabeling with a COCO model.
+  coco_classes: [0]
+
+video:
+  input_dir: "data/videos"
+  interval: 2.0
+  dedup: true
+  dedup_threshold: 8
+  save_empty_every: 8
+
+train:
+  model: "yolov8n.pt"
+  epochs: 100
+  batch: 16
+  imgsz: 640
+  device: "cpu"
+  workers: 4
+  patience: 20
+  lr0: 0.01
+  lrf: 0.01
+  seed: 42
+  deterministic: true
+  project: "runs/train"
+  name: "game_detector"
+  freeze: null
+  mosaic: 1.0
+  close_mosaic: 10
+  mixup: 0.0
+  copy_paste: 0.0
+  degrees: 0.0
+  translate: 0.1
+  scale: 0.5
+  fliplr: 0.5
+  hsv_h: 0.015
+  hsv_s: 0.7
+  hsv_v: 0.4
+  erasing: 0.2
+
+inference:
+  weights: "weights/best.pt"
+  conf_threshold: 0.35
+  iou_threshold: 0.5
+  imgsz: 640
+  save_txt: false
+  save_conf: false
+
+server:
+  host: "127.0.0.1"
+  port: 5000
+  per_page: 20

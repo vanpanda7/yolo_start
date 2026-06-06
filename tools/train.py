@@ -1,138 +1,201 @@
-# tools/train.py
-"""
-YOLOv8 训练脚本 —— 读取标注数据集，训练目标检测模型。
-
-Usage:
-    python train.py                # 使用 config.yaml 中的默认参数
-    python train.py --epochs 200    # 覆盖训练轮数
-    python train.py --device cuda:0 # 使用 GPU
-"""
+from __future__ import annotations
 
 import argparse
+import json
+import random
 import shutil
 import sys
 from pathlib import Path
-from typing import Dict
+from typing import Any
 
 import yaml
 
-# 确保能找到本目录的模块
 sys.path.insert(0, str(Path(__file__).parent))
+from common import (
+    configured_path,
+    dataset_dirs,
+    ensure_dataset_dirs,
+    get_class_names,
+    iter_images,
+    label_path_for,
+    load_config,
+    load_sources,
+    reset_dir,
+    set_seed,
+)
 
 
-def load_config(config_path: str = "config.yaml") -> dict:
-    config_path = Path(config_path)
-    if not config_path.exists():
-        config_path = Path(__file__).parent / "config.yaml"
-    with open(config_path, "r", encoding="utf-8") as f:
-        return yaml.safe_load(f)
+def _copy_pair(image: Path, labels_dir: Path, dst_images: Path, dst_labels: Path) -> None:
+    dst_images.mkdir(parents=True, exist_ok=True)
+    dst_labels.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(image, dst_images / image.name)
+    src_label = label_path_for(image, labels_dir)
+    dst_label = dst_labels / f"{image.stem}.txt"
+    if src_label.exists():
+        shutil.copy2(src_label, dst_label)
+    else:
+        dst_label.write_text("", encoding="utf-8")
 
 
-def prepare_dataset(config: dict) -> Path:
-    """检查数据集并生成 ultralytics 格式的 dataset.yaml。
+def collect_images(config: dict[str, Any]) -> list[Path]:
+    dirs = ensure_dataset_dirs(config)
+    include_negative = bool(config.get("dataset", {}).get("include_negative", True))
+    images = iter_images(dirs["images"], config)
+    if include_negative:
+        return images
+    return [img for img in images if label_path_for(img, dirs["labels"]).exists()]
 
-    Returns:
-        Path: 生成的 dataset.yaml 文件路径。
+
+def split_images(config: dict[str, Any], images: list[Path]) -> tuple[list[Path], list[Path], str]:
+    """Split images into train and validation sets.
+
+    Source-aware splitting matters for game footage because adjacent video
+    frames are highly similar. If one frame goes to train and the next goes to
+    val, validation can look better than the model really is.
     """
+    if not images:
+        return [], [], "empty"
+
     ds_cfg = config.get("dataset", {})
-    ds_path = Path(ds_cfg.get("path", "./dataset"))
-    if not ds_path.is_absolute():
-        ds_path = Path(__file__).parent / ds_path
+    seed = int(config.get("project", {}).get("seed", ds_cfg.get("seed", 42)))
+    train_split = float(ds_cfg.get("train_split", 0.85))
+    strategy = ds_cfg.get("split_strategy", "source")
+    rng = random.Random(seed)
 
-    img_dir = ds_path / "images"
-    lbl_dir = ds_path / "labels"
+    if strategy == "source":
+        sources = load_sources(config)
+        groups: dict[str, list[Path]] = {}
+        for image in images:
+            source = sources.get(image.name, image.name)
+            groups.setdefault(source, []).append(image)
 
-    # 获取所有有对应标签的图片
-    images = sorted(img_dir.glob("*.jpg")) + sorted(img_dir.glob("*.png"))
-    valid_images = []
-    for img in images:
-        lbl = lbl_dir / f"{img.stem}.txt"
-        if lbl.exists():
-            valid_images.append(img)
+        group_items = list(groups.items())
+        rng.shuffle(group_items)
 
-    if not valid_images:
+        if len(group_items) >= 2:
+            target = max(1, round(len(images) * train_split))
+            train: list[Path] = []
+            val: list[Path] = []
+            for _, group_images in group_items:
+                if len(train) < target:
+                    train.extend(group_images)
+                else:
+                    val.extend(group_images)
+            if not val:
+                _, last_group = group_items[-1]
+                for img in last_group:
+                    train.remove(img)
+                val.extend(last_group)
+            if not train:
+                _, first_group = group_items[0]
+                for img in first_group:
+                    val.remove(img)
+                train.extend(first_group)
+            return sorted(train), sorted(val), "source"
+
+    shuffled = images[:]
+    rng.shuffle(shuffled)
+    split_idx = max(1, int(len(shuffled) * train_split))
+    if len(shuffled) > 1:
+        split_idx = min(split_idx, len(shuffled) - 1)
+    train = shuffled[:split_idx]
+    val = shuffled[split_idx:] or shuffled[:]
+    return sorted(train), sorted(val), "image"
+
+
+def prepare_dataset(config: dict[str, Any]) -> Path:
+    """Build the Ultralytics-ready dataset directory.
+
+    The raw dataset remains in images/labels. prepared/ is a disposable copy
+    with train/val folders plus dataset.yaml, which is the file YOLO reads.
+    """
+    dirs = ensure_dataset_dirs(config)
+    images = collect_images(config)
+    if not images:
         raise RuntimeError(
-            f"数据集为空！请先用 labeler.py 标注一些图片。\n"
-            f"  图片目录: {img_dir}\n"
-            f"  标签目录: {lbl_dir}"
+            "Dataset is empty. Add images to "
+            f"{dirs['images']} and labels to {dirs['labels']}."
         )
 
-    print(f"  有效图片: {len(valid_images)} 张")
+    train_images, val_images, strategy = split_images(config, images)
+    prepared = dirs["prepared"]
+    reset_dir(prepared)
 
-    # 划分训练集/验证集
-    train_split = ds_cfg.get("train_split", 0.85)
-    split_idx = int(len(valid_images) * train_split)
-    train_images = valid_images[:split_idx]
-    val_images = valid_images[split_idx:]
+    for subset, subset_images in (("train", train_images), ("val", val_images)):
+        for image in subset_images:
+            _copy_pair(
+                image,
+                dirs["labels"],
+                prepared / subset / "images",
+                prepared / subset / "labels",
+            )
 
-    # 创建 train/val 目录结构
-    for subset, imgs in [("train", train_images), ("val", val_images)]:
-        sub_img = ds_path / subset / "images"
-        sub_lbl = ds_path / subset / "labels"
-        sub_img.mkdir(parents=True, exist_ok=True)
-        sub_lbl.mkdir(parents=True, exist_ok=True)
+    names = get_class_names(config)
+    dataset_yaml = prepared / "dataset.yaml"
+    dataset_yaml.write_text(
+        yaml.safe_dump(
+            {
+                "path": str(prepared.resolve()),
+                "train": "train/images",
+                "val": "val/images",
+                "nc": len(names),
+                "names": names,
+            },
+            sort_keys=False,
+            allow_unicode=True,
+        ),
+        encoding="utf-8",
+    )
 
-        # 用符号链接/复制避免重复占用磁盘
-        for img_path in imgs:
-            dst_img = sub_img / img_path.name
-            if not dst_img.exists():
-                shutil.copy2(img_path, dst_img)
-
-            lbl_path = lbl_dir / f"{img_path.stem}.txt"
-            dst_lbl = sub_lbl / lbl_path.name
-            if not dst_lbl.exists():
-                shutil.copy2(lbl_path, dst_lbl)
-
-    print(f"  训练集: {len(train_images)} 张")
-    print(f"  验证集: {len(val_images)} 张")
-    if len(val_images) < 10:
-        print(f"  ⚠ 验证集仅 {len(val_images)} 张，早停和mAP评估不可靠，建议标注更多图片")
-
-    # 生成 dataset.yaml
-    classes = config.get("classes", {0: "enemy_body", 1: "enemy_head"})
-    class_names = [classes[k] for k in sorted(classes.keys())]
-
-    ds_yaml_path = ds_path / "dataset.yaml"
-    ds_yaml_content = {
-        "path": str(ds_path.resolve()),
-        "train": "train/images",
-        "val": "val/images",
-        "nc": len(class_names),
-        "names": class_names,
+    manifest = {
+        "split_strategy": strategy,
+        "train_images": len(train_images),
+        "val_images": len(val_images),
+        "total_images": len(images),
+        "train": [p.name for p in train_images],
+        "val": [p.name for p in val_images],
     }
+    (prepared / "split_manifest.json").write_text(
+        json.dumps(manifest, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
 
-    with open(ds_yaml_path, "w", encoding="utf-8") as f:
-        yaml.dump(ds_yaml_content, f, default_flow_style=False, allow_unicode=True)
+    print(f"Dataset prepared: {prepared}")
+    print(f"  split: {strategy}")
+    print(f"  train: {len(train_images)} images")
+    print(f"  val:   {len(val_images)} images")
+    print(f"  yaml:  {dataset_yaml}")
+    return dataset_yaml
 
-    print(f"  dataset.yaml 已生成: {ds_yaml_path}")
-    return ds_yaml_path
 
+def train_model(config: dict[str, Any], dataset_yaml: Path, overrides: dict[str, Any]) -> Any:
+    try:
+        from ultralytics import YOLO
+    except ImportError as exc:
+        raise ImportError("ultralytics is not installed. Run: pip install -r requirements.txt") from exc
 
-def train(config: dict, dataset_yaml: Path, overrides: dict = None):
-    """执行 YOLOv8 训练，小数据集自动启用防过拟合策略。"""
     train_cfg = config.get("train", {})
+    seed = int(overrides.get("seed") or train_cfg.get("seed") or config.get("project", {}).get("seed", 42))
+    set_seed(seed)
 
-    # 检测数据集大小，自动调整策略
-    img_count = len(list((dataset_yaml.parent / "train" / "images").glob("*.jpg")))
-    is_small = img_count < 100
-
-    params = {
-        "model": train_cfg.get("model", "yolov8n.pt"),
+    params: dict[str, Any] = {
         "data": str(dataset_yaml),
         "epochs": train_cfg.get("epochs", 100),
         "batch": train_cfg.get("batch", 16),
         "imgsz": train_cfg.get("imgsz", 640),
         "device": train_cfg.get("device", "cpu"),
         "workers": train_cfg.get("workers", 4),
+        "patience": train_cfg.get("patience", 20),
         "lr0": train_cfg.get("lr0", 0.01),
         "lrf": train_cfg.get("lrf", 0.01),
-        "patience": train_cfg.get("patience", 20),
-        "save_period": train_cfg.get("save_period", 10),
-        "warmup_epochs": train_cfg.get("warmup_epochs", 3),
-        "cos_lr": train_cfg.get("cos_lr", False),
-        # 数据增强
+        "seed": seed,
+        "deterministic": train_cfg.get("deterministic", True),
+        "project": str(configured_path(config, "runs", "runs") / "train"),
+        "name": train_cfg.get("name", "game_detector"),
+        "exist_ok": True,
+        "freeze": train_cfg.get("freeze"),
         "mosaic": train_cfg.get("mosaic", 1.0),
-        "close_mosaic": train_cfg.get("close_mosaic", 15),
+        "close_mosaic": train_cfg.get("close_mosaic", 10),
         "mixup": train_cfg.get("mixup", 0.0),
         "copy_paste": train_cfg.get("copy_paste", 0.0),
         "degrees": train_cfg.get("degrees", 0.0),
@@ -142,97 +205,63 @@ def train(config: dict, dataset_yaml: Path, overrides: dict = None):
         "hsv_h": train_cfg.get("hsv_h", 0.015),
         "hsv_s": train_cfg.get("hsv_s", 0.7),
         "hsv_v": train_cfg.get("hsv_v", 0.4),
-        "erasing": train_cfg.get("erasing", 0.4),
+        "erasing": train_cfg.get("erasing", 0.2),
     }
+    params.update({k: v for k, v in overrides.items() if v is not None and k not in {"seed", "model"}})
+    params = {k: v for k, v in params.items() if v is not None}
 
-    # 小数据集自动激进策略（如果用户没显式设值）
-    freeze = train_cfg.get("freeze")
-    if freeze is None:
-        params["freeze"] = 10 if is_small else 0
-    else:
-        params["freeze"] = freeze
+    model_name = overrides.get("model") or train_cfg.get("model", "yolov8n.pt")
+    print("Training YOLO model")
+    print(f"  model: {model_name}")
+    print(f"  data:  {dataset_yaml}")
+    print(f"  runs:  {params['project']}/{params['name']}")
 
-    if is_small:
-        if train_cfg.get("epochs") is None:
-            params["epochs"] = 200
-        if train_cfg.get("mixup") is None or train_cfg.get("mixup") == 0.0:
-            params["mixup"] = 0.2
-        if train_cfg.get("close_mosaic") is None:
-            params["close_mosaic"] = 5
-        print(f"\n  ⚡ 检测到小数据集 ({img_count} 张)，自动启用防过拟合策略:")
-        print(f"     freeze={params['freeze']}, epochs={params['epochs']}, mixup={params['mixup']}")
-        print(f"     建议标注更多图片以获得更好效果 (目标 ≥200 张)\n")
+    model = YOLO(str(model_name))
+    results = model.train(**params)
 
-    if overrides:
-        params.update({k: v for k, v in overrides.items() if v is not None})
-
-    # 权重输出目录
-    weights_dir = Path(__file__).parent / "weights"
+    weights_dir = configured_path(config, "weights", "weights")
     weights_dir.mkdir(parents=True, exist_ok=True)
-    params["project"] = str(weights_dir)
-    params["name"] = "train"
+    run_weights = Path(results.save_dir) / "weights"
+    for name in ("best.pt", "last.pt"):
+        src = run_weights / name
+        if src.exists():
+            shutil.copy2(src, weights_dir / name)
+            print(f"Copied {name} -> {weights_dir / name}")
 
-    print("\n" + "=" * 60)
-    print("  开始训练")
-    print(f"  模型: {params['model']}  |  数据: {img_count} 张")
-    print(f"  轮数: {params['epochs']}  |  批次: {params['batch']}  |  设备: {params['device']}")
-    print(f"  冻结: {params['freeze']}层  |  mosaic: {params['mosaic']}  |  mixup: {params['mixup']}")
-    print(f"  输出: {weights_dir}/train/weights/")
-    print("=" * 60 + "\n")
-
-    try:
-        from ultralytics import YOLO
-
-        model = YOLO(params["model"])
-        results = model.train(**{k: v for k, v in params.items() if k != "model"})
-
-        # 训练完成后，复制最佳权重到 tools/weights/
-        best_src = Path(results.save_dir) / "weights" / "best.pt"
-        if best_src.exists():
-            best_dst = weights_dir / "best.pt"
-            shutil.copy2(best_src, best_dst)
-            print(f"\n✅ 最佳权重已保存: {best_dst}")
-
-        last_src = Path(results.save_dir) / "weights" / "last.pt"
-        if last_src.exists():
-            last_dst = weights_dir / "last.pt"
-            shutil.copy2(last_src, last_dst)
-
-        return results
-
-    except ImportError:
-        raise ImportError(
-            "ultralytics 未安装。请运行:\n"
-            "  pip install ultralytics"
-        )
+    return results
 
 
-def main():
-    parser = argparse.ArgumentParser(description="YOLOv8 目标检测训练")
-    parser.add_argument("--config", default="config.yaml", help="配置文件路径")
-    parser.add_argument("--epochs", type=int, help="训练轮数")
-    parser.add_argument("--batch", type=int, help="批次大小")
-    parser.add_argument("--device", type=str, help="设备 (cpu / cuda:0)")
-    parser.add_argument("--lr0", type=float, help="初始学习率")
-    parser.add_argument("--model", type=str, help="预训练模型路径")
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Prepare dataset and train YOLOv8.")
+    parser.add_argument("--config", default=None, help="Config file path. Defaults to ./config.yaml")
+    parser.add_argument("--prepare-only", action="store_true", help="Only build the prepared train/val dataset.")
+    parser.add_argument("--model", help="Base model or checkpoint, e.g. yolov8n.pt")
+    parser.add_argument("--epochs", type=int, help="Training epochs")
+    parser.add_argument("--batch", type=int, help="Batch size")
+    parser.add_argument("--imgsz", type=int, help="Image size")
+    parser.add_argument("--device", help="cpu, cuda:0, or other Ultralytics device value")
+    parser.add_argument("--workers", type=int, help="Data loader workers")
+    parser.add_argument("--seed", type=int, help="Random seed")
     args = parser.parse_args()
 
-    # 加载配置
     config = load_config(args.config)
-
-    # 准备数据集
-    print("检查数据集...")
     dataset_yaml = prepare_dataset(config)
+    if args.prepare_only:
+        return
 
-    # 训练
-    overrides = {
-        "epochs": args.epochs,
-        "batch": args.batch,
-        "device": args.device,
-        "lr0": args.lr0,
-        "model": args.model,
-    }
-    train(config, dataset_yaml, overrides)
+    train_model(
+        config,
+        dataset_yaml,
+        {
+            "model": args.model,
+            "epochs": args.epochs,
+            "batch": args.batch,
+            "imgsz": args.imgsz,
+            "device": args.device,
+            "workers": args.workers,
+            "seed": args.seed,
+        },
+    )
 
 
 if __name__ == "__main__":

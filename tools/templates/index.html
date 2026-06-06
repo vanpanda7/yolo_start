@@ -3,93 +3,118 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>数据集浏览器 - 仪表盘</title>
+<title>YOLO 控制台</title>
 <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
-<div class="container">
-    <nav>
-        <h1>🎯 DeltaForce 标注数据集</h1>
-<div class="nav-links">
-<a href="/" class="active">仪表盘</a>
-<a href="/gallery">图片画廊</a>
-<a href="/label">标注工作台</a>
-<a href="/videos">视频管理</a>
-<span style="color:#8b949e;font-size:.68rem;margin:0 4px">|</span>
-<select id="modelSel" style="background:#161b22;border:1px solid #30363d;color:#58a6ff;border-radius:4px;padding:2px 6px;font-size:.7rem;cursor:pointer;max-width:140px" onchange="switchModel(this.value)"></select>
-</div>
-<script>
-(async function(){const s=document.getElementById('modelSel');const r=await fetch('/api/models'),d=await r.json();s.innerHTML=d.available.map(m=>'<option value="'+m+'"'+(m===d.active?' selected':'')+'>'+m.replace('.pt','')+'</option>').join('')})();
-function switchModel(v){fetch('/api/models/active',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({model:v})});location.reload()}
-</script>
-    </nav>
+<div class="shell">
+    {% include "_nav.html" %}
 
-    <div class="stats-grid">
-        <div class="stat-card">
-            <div class="stat-number">{{ stats.total_images }}</div>
-            <div class="stat-label">总图片</div>
+    <section class="hero-panel">
+        <div>
+            <p class="eyebrow">Learning path</p>
+            <h1>按文件状态推进 YOLO 训练流程</h1>
+            <p class="hero-copy">这个后台把抽帧、标注、训练、评估和离线推理拆成可验证步骤。每一步都对应本地文件和一条可执行命令。</p>
         </div>
-        <div class="stat-card green">
-            <div class="stat-number">{{ stats.labeled_images }}</div>
-            <div class="stat-label">已标注</div>
+        <div class="hero-actions">
+            <a class="btn primary" href="/videos">上传或抽帧</a>
+            <a class="btn secondary" href="/label">进入标注</a>
         </div>
-        <div class="stat-card yellow">
-            <div class="stat-number">{{ stats.unlabeled_images }}</div>
-            <div class="stat-label">待标注</div>
-        </div>
-        <div class="stat-card">
-            <div class="stat-number">{{ stats.total_boxes }}</div>
-            <div class="stat-label">总标注框</div>
-        </div>
-    </div>
+    </section>
 
-    {% if stats.total_boxes > 0 %}
-    <div class="section">
-        <h2>类别分布</h2>
-        <div class="class-bars">
-            {% for cid, name in classes.items() %}
-            <div class="class-bar-row">
-                <span class="class-name">
-                    <span class="color-dot" style="background:rgb({{ [255,0,0] if cid == 0 else [0,0,255] }})"></span>
-                    {{ name }}
-                </span>
-                <div class="bar-track">
-                    {% set count = stats.class_counts.get(cid, 0) %}
-                    {% set pct = (count / stats.total_boxes * 100) if stats.total_boxes > 0 else 0 %}
-                    <div class="bar-fill" style="width:{{ pct }}%; background:rgb({{ [255,0,0] if cid == 0 else [0,0,255] }})"></div>
+    <section class="metric-grid">
+        <div class="metric-card">
+            <span class="metric-label">Images</span>
+            <strong>{{ stats.total_images }}</strong>
+            <span>{{ stats.unlabeled_images }} waiting</span>
+        </div>
+        <div class="metric-card">
+            <span class="metric-label">Labeled</span>
+            <strong>{{ stats.labeled_images }}</strong>
+            <span>{{ "%.0f"|format((stats.labeled_images / stats.total_images * 100) if stats.total_images else 0) }}% complete</span>
+        </div>
+        <div class="metric-card">
+            <span class="metric-label">Boxes</span>
+            <strong>{{ stats.total_boxes }}</strong>
+            <span>{{ classes|length }} class{{ '' if classes|length == 1 else 'es' }}</span>
+        </div>
+        <div class="metric-card">
+            <span class="metric-label">Artifacts</span>
+            <strong>{{ "Ready" if context.artifacts.best_weights else "None" }}</strong>
+            <span>weights/best.pt</span>
+        </div>
+    </section>
+
+    <section class="two-column">
+        <div class="panel">
+            <div class="panel-header">
+                <div>
+                    <p class="eyebrow">Step by step</p>
+                    <h2>工作流</h2>
                 </div>
-                <span class="class-count">{{ count }}</span>
+            </div>
+            <div class="workflow">
+                {% for step in workflow %}
+                <article class="workflow-step {{ step.status }}">
+                    <div class="step-index">{{ step.number }}</div>
+                    <div class="step-body">
+                        <div class="step-title-row">
+                            <h3>{{ step.title }}</h3>
+                            <span class="status-pill {{ step.status }}">{{ step.status }}</span>
+                        </div>
+                        <p>{{ step.summary }}</p>
+                        <p class="step-note">{{ step.note }}</p>
+                        <div class="command-row">
+                            <code>{{ step.command }}</code>
+                            <a href="{{ step.href }}">{{ step.action }}</a>
+                        </div>
+                    </div>
+                </article>
+                {% endfor %}
+            </div>
+        </div>
+
+        <aside class="panel">
+            <div class="panel-header">
+                <div>
+                    <p class="eyebrow">Key information</p>
+                    <h2>当前项目状态</h2>
+                </div>
+            </div>
+
+            <div class="info-list">
+                <div><span>Active prelabel model</span><code>{{ context.active_model }}</code></div>
+                <div><span>Dataset</span><code>{{ context.paths.dataset }}</code></div>
+                <div><span>Images</span><code>{{ context.paths.images }}</code></div>
+                <div><span>Labels</span><code>{{ context.paths.labels }}</code></div>
+                <div><span>Sources</span><code>{{ context.paths.sources }}</code></div>
+                <div><span>Prepared split</span><code>{{ "exists" if context.artifacts.prepared_yaml else "not built" }}</code></div>
+                <div><span>Evaluation</span><code>{{ "exists" if context.artifacts.evaluation_report else "not run" }}</code></div>
+            </div>
+
+            <div class="callout">
+                <strong>行为说明</strong>
+                <p>Web 操作只修改本地数据集文件。训练脚本读取 <code>images/</code>、<code>labels/</code> 和 <code>sources.json</code>，不会连接实时屏幕。</p>
+            </div>
+        </aside>
+    </section>
+
+    <section class="panel">
+        <div class="panel-header">
+            <div>
+                <p class="eyebrow">Commands</p>
+                <h2>常用命令</h2>
+            </div>
+        </div>
+        <div class="command-grid">
+            {% for name, command in context.commands.items() %}
+            <div class="command-card">
+                <span>{{ name.replace('_', ' ') }}</span>
+                <code>{{ command }}</code>
             </div>
             {% endfor %}
         </div>
-    </div>
-    {% endif %}
-
-    <div class="section quick-links">
-        <h2>快捷操作</h2>
-        <div class="link-grid">
-            <a href="/gallery" class="link-card"><span class="link-icon">🖼️</span><span>浏览全部图片</span></a>
-            <a href="/label" class="link-card"><span class="link-icon">✏️</span><span>标注工作台</span></a>
-            <a href="#" class="link-card" onclick="dedupDataset();return false" id="dedupBtn"><span class="link-icon">🧹</span><span>去重相似图片</span></a>
-        </div>
-    </div>
-<script>
-async function dedupDataset(){
-    const btn=document.getElementById('dedupBtn');
-    if(!confirm('将删除高度相似的重复图片（保留第一张）。\n\n建议先去重预览查看影响范围。\n\n确定执行？'))return;
-    btn.querySelector('span:last-child').textContent='去重中...';
-    try{
-        const r=await fetch('/api/dedup',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({threshold:8,dry_run:true})});
-        const d=await r.json();
-        if(!confirm('预览：共'+d.total+'张，将删除'+d.removed+'张重复，保留'+d.kept+'张。\n\n执行删除？')){btn.querySelector('span:last-child').textContent='去重相似图片';return}
-        const r2=await fetch('/api/dedup',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({threshold:8,dry_run:false})});
-        const d2=await r2.json();
-        alert('去重完成！删除'+d2.removed+'张，保留'+d2.kept+'张');
-        location.reload();
-    }catch(e){alert('失败: '+e.message)}
-    btn.querySelector('span:last-child').textContent='去重相似图片';
-}
-</script>
+    </section>
 </div>
 </body>
 </html>

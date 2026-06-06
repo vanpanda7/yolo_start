@@ -1,20 +1,3 @@
-# 屏幕捕获
-mss>=9.0.0
-
-# 图像处理（标注工具用，通常已有）
-opencv-python>=4.1.1
-numpy>=1.21.0
-
-# YOLO 训练（通常已有）
-ultralytics>=8.2.64
-torch>=2.0.0
-torchvision>=0.15.0
-
-# 视频抽帧进度条
-tqdm>=4.64.0
-
-# Web 服务器
-flask>=2.0.0
-
-# 配置文件解析
-PyYAML>=6.0
+# Compatibility file. Install from the project root instead:
+#   pip install -r requirements.txt
+-r ../requirements.txt

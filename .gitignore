@@ -2,12 +2,16 @@
 __pycache__/
 *.pyc
 *.pyo
+.venv*/
 
-# Dataset (generated)
-tools/dataset/
-tools/videos/
-tools/weights/
-tools/model_state.json
+# Dataset and generated artifacts
+datasets/
+data/videos/
+data/imports/
+weights/
+runs/
+reports/
+exports/
 
 # Downloaded models
 *.pt
@@ -26,5 +30,5 @@ logs/
 # Config overrides
 config.local.yaml
 
-# Downloads / temp
+# Local temp
 downloads/
