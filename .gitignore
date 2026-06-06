@@ -1,0 +1,30 @@
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Dataset (generated)
+tools/dataset/
+tools/videos/
+tools/weights/
+tools/model_state.json
+
+# Downloaded models
+*.pt
+*.onnx
+*.engine
+
+# Logs
+*.log
+logs/
+
+# IDE
+.idea/
+.vscode/
+.omo/
+
+# Config overrides
+config.local.yaml
+
+# Downloads / temp
+downloads/

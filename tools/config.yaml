@@ -1,0 +1,95 @@
+# ============================================================
+# DeltaForce OBS Locker - 目标检测训练流水线配置
+# ============================================================
+
+# --- 检测类别 ---
+classes:
+  0: enemy_body
+  1: enemy_head
+  2: menu_player   # 装备界面的角色模型，推理时自动忽略
+
+class_colors:
+  0: [255, 0, 0]     # 蓝 - enemy_body
+  1: [0, 0, 255]     # 红 - enemy_head
+  2: [0, 255, 255]   # 黄 - menu_player（推理时忽略）
+
+# --- AI 预标注 ---
+ai:
+  conf_threshold: 0.25
+  model_weights: "./weights/best.pt"  # 优先用自己训练的模型，留空则用 yolov8n.pt
+
+# --- 排除区域（AI 检测时跳过，如主播头像、水印）---
+# 格式: [x1, y1, x2, y2] 像素坐标（相对于捕获分辨率）
+# 也可以写归一化坐标: [x1, y1, x2, y2, "norm"]
+# 主播头像通常在左下角，例如 2560x1440 屏幕上：
+#   - [0, 1100, 400, 1440]  # 左下 400x340 区域
+# 直播水印示例:
+#   - [2100, 0, 2560, 200]  # 右上水印
+exclude_zones: []
+
+# --- 屏幕捕获 ---
+capture:
+  monitor: 2
+  fps: 30
+  region: null
+  downsample: 1.0
+  center_size: 640          # 中心检测区域边长（0=全屏），推荐 640。自动排除武器区
+  max_box_ratio: 0.25       # 忽略占比超过此值的超大框
+
+# --- 视频抽帧 ---
+video:
+  input_dir: "./videos"
+  interval: 2.0
+  dedup: true
+  dedup_threshold: 8
+
+# --- 数据集 ---
+dataset:
+  path: "./dataset"
+  train_split: 0.85
+
+# --- 训练参数 ---
+# 不同数据量推荐: <100张 freeze=10 close_mosaic=0 | 100-500 freeze=5 close_mosaic=15 | 500+ freeze=0 close_mosaic=10
+train:
+  model: "yolov8n.pt"     # 预训练权重
+  epochs: 100             # 训练轮数（小数据建议 200）
+  batch: 16
+  imgsz: 640
+  device: "cpu"
+  workers: 4
+  lr0: 0.01               # 初始学习率
+  lrf: 0.01               # 最终学习率因子
+  patience: 20            # 早停
+  save_period: 10
+  freeze: null            # 冻结 backbone 层数，null=自动
+  warmup_epochs: 3        # 预热轮数
+  cos_lr: false           # 余弦学习率
+  mosaic: 1.0             # mosaic 概率
+  close_mosaic: 15        # 结束前 N 轮关 mosaic
+  mixup: 0.0              # mixup 概率（小数据建议 0.2）
+  copy_paste: 0.0         # copy-paste 概率
+  degrees: 0.0            # 旋转
+  translate: 0.1          # 平移
+  scale: 0.5              # 缩放
+  fliplr: 0.5             # 水平翻转
+  hsv_h: 0.015            # 色调
+  hsv_s: 0.7              # 饱和度
+  hsv_v: 0.4              # 亮度
+  erasing: 0.4            # 随机擦除
+
+# --- Web 服务器 ---
+server:
+  host: "0.0.0.0"
+  port: 5000
+  per_page: 20
+
+# --- 推理参数 ---
+inference:
+  conf_threshold: 0.5
+  iou_threshold: 0.6
+  weights: "./weights/best.pt"     # 默认模型
+  weights_list:                    # 多模型列表（可选，覆盖 weights）
+    - "./weights/best.pt"
+  show_fps: true
+  show_labels: true
+  smooth: true                     # Kalman 平滑跟踪

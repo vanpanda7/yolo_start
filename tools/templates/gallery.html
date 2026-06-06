@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>图片画廊 - 数据集浏览器</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div class="container">
+    <nav>
+        <h1>🎯 图片画廊</h1>
+<div class="nav-links">
+<a href="/">仪表盘</a>
+<a href="/gallery" class="active">图片画廊</a>
+<a href="/label">标注工作台</a>
+<a href="/videos">视频管理</a>
+<span style="color:#8b949e;font-size:.68rem;margin:0 4px">|</span>
+<select id="modelSel" style="background:#161b22;border:1px solid #30363d;color:#58a6ff;border-radius:4px;padding:2px 6px;font-size:.7rem;cursor:pointer;max-width:140px" onchange="switchModel(this.value)"></select>
+</div>
+<script>
+(async function(){const s=document.getElementById('modelSel');const r=await fetch('/api/models'),d=await r.json();s.innerHTML=d.available.map(m=>'<option value="'+m+'"'+(m===d.active?' selected':'')+'>'+m.replace('.pt','')+'</option>').join('')})();
+function switchModel(v){fetch('/api/models/active',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({model:v})});location.reload()}
+</script>
+    </nav>
+
+    <p class="gallery-info">{{ total }} 张图片，第 {{ page }}/{{ total_pages }} 页</p>
+
+    {% if images %}
+    <div class="gallery-grid">
+        {% for img in images %}
+        <a href="/image/{{ img.name }}" class="gallery-item">
+            <img src="/image/{{ img.name }}/thumb" alt="{{ img.name }}" loading="lazy">
+            <div class="gallery-item-info">
+                <span class="item-name">{{ img.name }}</span>
+                <span class="item-boxes">{{ img.box_count }} 框</span>
+                {% if img.boxes %}
+                <div class="item-classes">
+                    {% set cls_ids = img.boxes | map(attribute='class_id') | unique | list %}
+                    {% for cid in cls_ids %}
+                    <span class="mini-tag" style="background:rgb({{ [255,0,0] if cid == 0 else [0,0,255] }})">
+                        {{ classes.get(cid, '?') }}
+                    </span>
+                    {% endfor %}
+                </div>
+                {% endif %}
+            </div>
+        </a>
+        {% endfor %}
+    </div>
+
+    <div class="pagination">
+        {% if page > 1 %}
+        <a href="/gallery?page={{ page - 1 }}" class="page-btn">← 上一页</a>
+        {% endif %}
+        {% for p in range(1, total_pages + 1) %}
+            {% if p == page %}
+            <span class="page-btn active">{{ p }}</span>
+            {% elif p <= 3 or p > total_pages - 3 or (p >= page - 2 and p <= page + 2) %}
+            <a href="/gallery?page={{ p }}" class="page-btn">{{ p }}</a>
+            {% elif p == 4 or p == total_pages - 3 %}
+            <span class="page-btn">...</span>
+            {% endif %}
+        {% endfor %}
+        {% if page < total_pages %}
+        <a href="/gallery?page={{ page + 1 }}" class="page-btn">下一页 →</a>
+        {% endif %}
+    </div>
+    {% else %}
+    <div class="empty-state">
+        <p>📭 还没有标注图片。运行 labeler.py 开始标注吧！</p>
+    </div>
+    {% endif %}
+</div>
+</body>
+</html>
